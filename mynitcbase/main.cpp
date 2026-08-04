@@ -1,4 +1,5 @@
-/*#include <cstring>
+#include <iostream>
+#include <cstring>
 #include <iostream>
 
 #include "Buffer/StaticBuffer.h"
@@ -6,74 +7,157 @@
 #include "Disk_Class/Disk.h"
 #include "FrontendInterface/FrontendInterface.h"
 
-int main(int argc, char *argv[]) {
-    Initialize the Run Copy of Disk 
-    Disk disk_run;
-
-    // These are used in later stages.
-    // StaticBuffer buffer;
-    // OpenRelTable cache;
-
-    // Create a 2048-byte buffer.
-    unsigned char buffer[BLOCK_SIZE];
-
-    // Read block 7000 into memory.
-    Disk::readBlock(buffer, 7000);
-
-    // Write "hello" starting at byte offset 20.
-    char message[] = "hello";
-    memcpy(buffer + 20, message, 6);
-
-    // Write the modified block back to disk.
-    Disk::writeBlock(buffer, 7000);
-
-    // Read the block again into a second buffer.
-    unsigned char buffer2[BLOCK_SIZE];
-    char message2[6];
-
-    Disk::readBlock(buffer2, 7000);
-
-    // Copy the message back from the block.
-    memcpy(message2, buffer2 + 20, 6);
-
-    // Print the message.
-    std::cout << message2 << std::endl;
-
-    // We will use the frontend from Stage 2 onwards.
-    // return FrontendInterface::handleFrontend(argc, argv);
-
-    return 0;
-}*/
-/**/
-#include <iostream>
-
-#include "Buffer/StaticBuffer.h"
-#include "Cache/OpenRelTable.h"
-#include "Disk_Class/Disk.h"
-#include "FrontendInterface/FrontendInterface.h"
+/*
 
 int main(int argc, char *argv[]) {
-    /* Initialize the Run Copy of Disk */
     Disk disk_run;
 
-    // These will be used in later stages.
-    // StaticBuffer buffer;
-    // OpenRelTable cache;
+    RecBuffer relCatBuffer(RELCAT_BLOCK);
+    RecBuffer attrCatBuffer(ATTRCAT_BLOCK);
 
-    unsigned char buffer[BLOCK_SIZE];
+    HeadInfo relCatHeader;
+    HeadInfo attrCatHeader;
 
-    // Read Block Allocation Map (Block 0)
-    Disk::readBlock(buffer, 0);
+    relCatBuffer.getHeader(&relCatHeader);
+    attrCatBuffer.getHeader(&attrCatHeader);
 
-    // Print the first 8 bytes
-    for (int i = 0; i < 8; i++) {
-        std::cout << (int)buffer[i] << " ";
+    for (int i = 0; i < relCatHeader.numEntries; i++) {
+        Attribute relCatRecord[RELCAT_NO_ATTRS];
+        relCatBuffer.getRecord(relCatRecord, i);
+
+        printf("Relation: %s\n", relCatRecord[RELCAT_REL_NAME_INDEX].sVal);
+
+        for (int j = 0; j < attrCatHeader.numEntries; j++) {
+            Attribute attrCatRecord[ATTRCAT_NO_ATTRS];
+            attrCatBuffer.getRecord(attrCatRecord, j);
+
+            if (strcmp(attrCatRecord[ATTRCAT_REL_NAME_INDEX].sVal,
+                       relCatRecord[RELCAT_REL_NAME_INDEX].sVal) == 0) {
+                const char *attrType =
+                    attrCatRecord[ATTRCAT_ATTR_TYPE_INDEX].nVal == NUMBER ? "NUM" : "STR";
+                printf("  %s: %s\n", attrCatRecord[ATTRCAT_ATTR_NAME_INDEX].sVal, attrType);
+            }
+        }
+        printf("\n");
     }
-
-    std::cout << std::endl;
-
-    // We will enable the frontend in later stages.
-    // return FrontendInterface::handleFrontend(argc, argv);
 
     return 0;
 }
+*/
+
+//ASSIGNMENT 1
+
+int main(int argc, char *argv[]) {
+  Disk disk_run;
+
+  // create objects for the relation catalog and its header
+  RecBuffer relCatBuffer(RELCAT_BLOCK);
+  HeadInfo relCatHeader;
+  relCatBuffer.getHeader(&relCatHeader);
+
+
+  for (int i=0; i<relCatHeader.numEntries; i++) { //looping thru block 4
+
+    Attribute relCatRecord[RELCAT_NO_ATTRS]; // stores relation, catalog record: a record is an array of attributes
+    relCatBuffer.getRecord(relCatRecord, i);
+
+    printf("Relation: %s\n", relCatRecord[RELCAT_REL_NAME_INDEX].sVal);
+
+    int currAttrBlock=ATTRCAT_BLOCK;
+    while(currAttrBlock!=-1) {
+
+        //objects for attribute catalog block
+        //cant use a global RecBuffer as the attribute catalog spans multiple blocks
+        RecBuffer currAttrBuff(currAttrBlock);
+        HeadInfo currAttrCatHeader;
+        currAttrBuff.getHeader(&currAttrCatHeader);
+
+        for(int j=0; j<currAttrCatHeader.numEntries; j++){ //loopong thru current attribute catalog block
+
+          Attribute attrCatRecord[ATTRCAT_NO_ATTRS];
+          currAttrBuff.getRecord(attrCatRecord, j);
+          
+          if (strcmp(attrCatRecord[ATTRCAT_REL_NAME_INDEX].sVal,
+                    relCatRecord[RELCAT_REL_NAME_INDEX].sVal) == 0) {
+            const char *attrType = attrCatRecord[ATTRCAT_ATTR_TYPE_INDEX].nVal == NUMBER ? "NUM" : "STR";
+            printf("  %s: %s\n", attrCatRecord[ATTRCAT_ATTR_NAME_INDEX].sVal, attrType);
+          }
+        }
+  
+      currAttrBlock=currAttrCatHeader.rblock; //move to next bloxk in linked list
+    }
+    printf("\n");
+  }
+
+  return 0;
+}
+
+/*ASSIGNMENT 2
+int main(int argc, char *argv[]) {
+  Disk disk_run;
+
+  // create objects for the relation catalog and header
+  RecBuffer relCatBuffer(RELCAT_BLOCK);
+  HeadInfo relCatHeader;
+  relCatBuffer.getHeader(&relCatHeader);
+
+  for (int i=0; i<relCatHeader.numEntries; i++) { //looping thru reln catalog
+
+    Attribute relCatRecord[RELCAT_NO_ATTRS]; // stores relation catalog record
+    relCatBuffer.getRecord(relCatRecord, i);
+
+    if(strcmp(relCatRecord[RELCAT_REL_NAME_INDEX].sVal, "Student")!=0) continue;
+
+    // --- update: find "Class" attr of Student, rename to "Batch" ---
+    int currAttrBlock=ATTRCAT_BLOCK;
+    while(currAttrBlock!=-1) {
+
+        RecBuffer currAttrBuff(currAttrBlock);
+        HeadInfo currAttrCatHeader;
+        currAttrBuff.getHeader(&currAttrCatHeader);
+
+        for(int j=0; j<currAttrCatHeader.numEntries; j++){ //looping thru current attribute catalog block
+
+          Attribute attrCatRecord[ATTRCAT_NO_ATTRS];
+          currAttrBuff.getRecord(attrCatRecord, j);
+
+          if (strcmp(attrCatRecord[ATTRCAT_REL_NAME_INDEX].sVal, "Student")==0 &&
+              strcmp(attrCatRecord[ATTRCAT_ATTR_NAME_INDEX].sVal, "Class")==0) {
+            strcpy(attrCatRecord[ATTRCAT_ATTR_NAME_INDEX].sVal, "Batch");
+            currAttrBuff.setRecord(attrCatRecord, j);
+          }
+        }
+
+      currAttrBlock=currAttrCatHeader.rblock; //move to next block in linked list
+    }
+
+    // --- verification phase: reprint Student's full schema ---
+    printf("Relation: %s\n", relCatRecord[RELCAT_REL_NAME_INDEX].sVal);
+
+    currAttrBlock=ATTRCAT_BLOCK; // reuse, outer while has fully exited by now
+    while(currAttrBlock!=-1) {
+
+        RecBuffer currAttrBuff(currAttrBlock);
+        HeadInfo currAttrCatHeader;
+        currAttrBuff.getHeader(&currAttrCatHeader);
+
+        for(int j=0; j<currAttrCatHeader.numEntries; j++){
+
+          Attribute attrCatRecord[ATTRCAT_NO_ATTRS];
+          currAttrBuff.getRecord(attrCatRecord, j);
+
+          if (strcmp(attrCatRecord[ATTRCAT_REL_NAME_INDEX].sVal, "Student")==0) {
+            const char *attrType = attrCatRecord[ATTRCAT_ATTR_TYPE_INDEX].nVal == NUMBER ? "NUM" : "STR";
+            printf("  %s: %s\n", attrCatRecord[ATTRCAT_ATTR_NAME_INDEX].sVal, attrType);
+          }
+        }
+
+      currAttrBlock=currAttrCatHeader.rblock;
+    }
+
+    break;
+  }
+
+  return 0;
+}
+*/ 

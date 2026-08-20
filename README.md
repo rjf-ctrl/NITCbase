@@ -1,57 +1,55 @@
-# Stage 4 — The Block Access Layer
+# Stage 5 — Opening Arbitrary Relations
 
 ## Goal
 
-So far, working with a relation meant manually reading block by block, checking headers and slot maps by hand. This stage builds a layer that hides all of that — `BlockAccess` — so higher-level code can just ask "give me the next record that matches this condition" without knowing anything about blocks, slots, or how relations are laid out on disk. On top of it, this stage also implements the first real relational operation: `SELECT`.
+Stage 4 left a hard limitation: `SELECT` only worked on `RELATIONCAT` and `ATTRIBUTECAT`, because `OpenRelTable::getRelId` was hardcoded to recognize just those two names. This stage removes that restriction — it builds real relation-opening machinery, so any relation on disk (`Students`, `Events`, etc.) can be opened into a free cache slot, searched, and closed again, using the same `BlockAccess`/`Algebra` layers built in Stage 4 without any changes to them.
 
-## Phase 1: Linear Search
-
-### `BlockAccess/BlockAccess.cpp` (new file)
-
-*What this file does: scans through a relation's blocks one record at a time, looking for records that satisfy a condition, and remembers where it left off so it can be called again for the next match.*
-
-- `linearSearch(relId, attrName, attrVal, op)`:
-  - Checks the relation cache for a previous search position (`searchIndex`). If there isn't one (`{-1, -1}`), starts from the relation's first block. If there is one, resumes from the very next slot after the last hit — this is what lets the function be called repeatedly to walk through all matches one at a time, instead of returning everything at once.
-  - Walks the relation's blocks using each block's header (`rblock`) to find the next one, the same way a linked list is traversed.
-  - For each block, checks the slot map first — skips any slot marked unoccupied without wasting time reading it.
-  - For each occupied slot, reads the record and looks up where the target attribute sits inside it (`AttrCacheTable::getAttrCatEntry`), then compares that value against `attrVal` using `compareAttrs`.
-  - If the comparison satisfies whichever operator was passed in (`EQ`, `NE`, `LT`, `LE`, `GT`, `GE`), it saves this position as the new search index (so the *next* call resumes from here) and returns the record's location.
-  - If it runs out of blocks without a match, returns `{-1, -1}`.
-
-## Phase 2: The SELECT Operation
-
-### `Algebra/Algebra.cpp` (new file)
-
-*This is where relational operations live. Stage 4 adds the first one — SELECT — plus two small helpers it depends on.*
-
-- `compareAttrs(attr1, attr2, attrType)`: compares two attribute values and returns negative, zero, or positive — using `strcmp` for STRING attributes and plain subtraction for NUMBER attributes. This one function is what lets `linearSearch` handle both types uniformly instead of branching everywhere.
-- `isNumber(str)`: checks whether a string is purely a valid float, with nothing extra before or after it — used to validate user input before treating it as a NUMBER value.
-- `Algebra::select(srcRel, targetRel, attr, op, strVal)`:
-  - Resolves `srcRel`'s name to an ID via `OpenRelTable::getRelId` — fails with `E_RELNOTOPEN` if it isn't open.
-  - Looks up the condition attribute's catalog entry to get its type — fails with `E_ATTRNOTEXIST` if the attribute doesn't exist.
-  - Converts `strVal` (always a string from user input) into a proper `Attribute` union — parsed as a float if the attribute is NUMBER (validated with `isNumber`, failing with `E_ATTRTYPEMISMATCH` if it isn't a real number), or copied as-is if it's STRING.
-  - Resets the search index (`RelCacheTable::resetSearchIndex`) so this query starts fresh instead of continuing from some earlier unrelated search.
-  - Prints a header row of attribute names.
-  - Repeatedly calls `BlockAccess::linearSearch` in a loop, printing each matching record until it returns `{-1, -1}`.
-  - Note: this stage only prints results to the console — actually creating `targetRel` as a new relation isn't implemented yet, since that's not permitted by the real spec and comes later.
+## Phase 1: Tracking Which Relations Are Open
 
 ### `Cache/OpenRelTable.cpp` (updated)
 
-- `getRelId(relName)`: hardcoded to recognize only two names — the Relation Catalog and Attribute Catalog — returning their fixed IDs. Any other name returns `E_RELNOTOPEN`. Proper lookup of arbitrary relations (searching, opening, assigning a real cache slot) isn't implemented until a later stage.
+*What changed: alongside the existing `relCache`/`attrCache` arrays, this stage introduces `tableMetaInfo` — bookkeeping for which of the 12 cache slots are free and which relation name occupies each occupied one.*
 
-### `Cache/AttrCacheTable.cpp` (updated)
+- Constructor: now also initializes every `tableMetaInfo` slot to free, then immediately marks `RELCAT_RELID` and `ATTRCAT_RELID` as permanently occupied with their names set — these two never get closed or reassigned, since every other operation depends on them staying loaded.
+- Destructor: unchanged in spirit — still frees slots 0 and 1 directly, and now also closes any other relation left open (rel-id ≥ 2) via `closeRel` before the program exits, so nothing leaks regardless of what the user opened during the session.
 
-- Added the name-based overload of `getAttrCatEntry(relId, attrName, attrCatBuf)`, alongside the existing offset-based one from Stage 3. Walks the same per-relation linked list, but matches on `attrName` via `strcmp` instead of a numeric offset — this is what `linearSearch` and `select` use to find an attribute by name rather than position.
+## Phase 2: Opening and Closing Relations
+
+### `Cache/OpenRelTable.cpp` (new functions)
+
+- `getFreeOpenRelTableEntry()`: scans `tableMetaInfo` from slot 2 onward (0 and 1 are reserved for the catalogs) and returns the first free slot, or `E_CACHEFULL` if all 12 are occupied.
+
+- `getRelId(relName)`: rewritten from Stage 4's two-name hardcode into a real lookup — scans every occupied `tableMetaInfo` slot for a name match and returns its rel-id, or `E_RELNOTOPEN` if the relation isn't currently open. This is what unblocks `Algebra::select` for arbitrary relations, since `select` was already written generically against `getRelId` — it never needed to change.
+
+- `openRel(relName)`: the core addition this stage.
+  - Returns the existing rel-id immediately if the relation is already open, so nothing gets opened twice.
+  - Grabs a free slot via `getFreeOpenRelTableEntry`.
+  - Uses `BlockAccess::linearSearch` on `RELCAT_RELID` to find the relation's own entry in the relation catalog by name — reusing Stage 4's search layer rather than manually scanning blocks.
+  - Loads that entry into `relCache` at the new rel-id.
+  - Loops `linearSearch` on `ATTRCAT_RELID`, once per expected attribute (`numAttrs` from the entry just loaded), building a linked list of that relation's attributes into `attrCache` — same resumable-search pattern `select` itself uses to walk multiple matches.
+  - Marks the slot occupied in `tableMetaInfo` with the relation's name.
+
+- `closeRel(relId)`:
+  - Refuses to close `RELCAT_RELID` or `ATTRCAT_RELID` (`E_NOTPERMITTED`) — the catalogs must stay open for the program's lifetime.
+  - Validates `relId` is in range and actually open, failing with `E_OUTOFBOUND` / `E_RELNOTOPEN` otherwise.
+  - Frees the `relCache` entry and walks/frees the entire `attrCache` linked list for that rel-id — every `malloc` from `openRel` gets exactly one matching `free`.
+  - Resets the slot to free and nulls out both cache pointers, so the slot is safely reusable by a future `openRel` call.
+
+### `Schema/Schema.cpp` (new)
+
+- `Schema::openRel(relName)`: thin wrapper — calls `OpenRelTable::openRel`, translates a non-negative rel-id into `SUCCESS`, and passes any error code straight through. This is what the frontend's `OPEN TABLE` command actually calls.
+- `Schema::closeRel(relName)`: blocks closing either catalog by name before even doing a lookup, otherwise resolves the name via `getRelId` and delegates to `OpenRelTable::closeRel`.
 
 ## Key Data Structures
 
-- **`RecId`** – a `{block, slot}` pair identifying exactly one record's location. What `linearSearch` returns.
-- **`Attribute`** – the union already in use from earlier stages; here it's what condition values and record fields are compared as.
-- **`searchIndex`** – per-relation state in `RelCacheTable` that makes `linearSearch` resumable across repeated calls.
+- **`OpenRelTableMetaInfo`** – per-slot bookkeeping added this stage: whether the slot is free, and if not, which relation's name occupies it. This is what makes `getRelId` and `getFreeOpenRelTableEntry` possible — Stage 4 had no concept of "currently open relations" beyond two hardcoded IDs.
+- **`relCache` / `attrCache`** – same structures from Stage 3, now populated dynamically by `openRel` for any relation instead of only being hand-filled in the constructor for the catalogs (and `Students`, as a one-off Stage 3 exercise).
 
 ## Outcome
 
-- Can now search a relation for records matching a condition (`=`, `≠`, `<`, `≤`, `>`, `≥`) without manually touching blocks or slots.
-- `SELECT` works, but **only on `RELATIONCAT` and `ATTRIBUTECAT`** — user-created relations like `Students` can't be opened or queried yet, since `getRelId` is still hardcoded to just the two catalogs.
-- Results are printed straight to the console, not written into a new relation — that's a later-stage limitation, consistent with the spec note that direct console output isn't the final behavior.
-- No changes to how relations are created, opened, or modified — this stage is purely about *reading* via search.
+- Any relation on disk can now be opened (`OPEN TABLE <name>`), searched (`SELECT`), and closed (`CLOSE TABLE <name>`) — `Algebra::select` from Stage 4 needed zero changes, since it was always written against the generic `getRelId`/`linearSearch` interface.
+- Opening a relation that doesn't exist correctly fails, rather than silently reporting success — a real check now backs the operation instead of a placeholder message.
+- Opening an already-open relation returns the same rel-id rather than duplicating cache entries.
+- Closing a relation properly frees every allocation made when it was opened — no leaks, verified by matching every `malloc` in `openRel` to a `free` in `closeRel`.
+- The catalogs remain permanently open and cannot be closed, matching the constraint that every other cache lookup depends on them.
+- Two easy-to-hit setup bugs worth remembering: forgetting to actually define the static `tableMetaInfo` array (`OpenRelTable::tableMetaInfo`, not a stray `static` file-scope variable of the same name) causes linker errors; forgetting to initialize `tableMetaInfo` slots as free in the constructor makes every `OPEN TABLE` fail with `E_CACHEFULL` immediately, since uninitialized struct memory reads as "not free."

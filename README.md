@@ -1,124 +1,57 @@
-# Stage 3 — The Disk Buffer & Catalog Caches
+# Stage 4 — The Block Access Layer
 
 ## Goal
 
-Disk reads are slow. This stage adds a memory buffer so we don't hit the disk every single time we need a block, and builds an in-memory cache of the two system catalogs (Relation Catalog, Attribute Catalog) so basic schema info is instantly available without re-reading records over and over.
+So far, working with a relation meant manually reading block by block, checking headers and slot maps by hand. This stage builds a layer that hides all of that — `BlockAccess` — so higher-level code can just ask "give me the next record that matches this condition" without knowing anything about blocks, slots, or how relations are laid out on disk. On top of it, this stage also implements the first real relational operation: `SELECT`.
 
-## Phase 1: The Disk Buffer
+## Phase 1: Linear Search
 
-### `Buffer/StaticBuffer.cpp` (new file)
+### `BlockAccess/BlockAccess.cpp` (new file)
 
-*What this file does: holds 32 "slots" of memory, each one big enough to hold a copy of a disk block. Keeps track of which slots are empty and which disk block each occupied slot is holding.*
+*What this file does: scans through a relation's blocks one record at a time, looking for records that satisfy a condition, and remembers where it left off so it can be called again for the next match.*
 
-- Set up the memory pool itself — `blocks[32][BLOCK_SIZE]` — and a second array, `metainfo[32]`, that just remembers "is this slot free?" and "if not, which block number is sitting in it?"
-- Constructor: marks all 32 slots as empty when the program starts.
-- Destructor: does nothing for now. We're only reading through the buffer this stage, not writing to it, so there's nothing to save back to disk yet. That comes in Stage 6.
-- `getFreeBuffer(blockNum)`: finds the first empty slot, marks it as now holding `blockNum`, and hands back which slot number it used.
-- `getBufferNum(blockNum)`: checks if a given block is already sitting in one of the 32 slots. If yes, returns which slot. If not, says so (`E_BLOCKNOTINBUFFER`).
+- `linearSearch(relId, attrName, attrVal, op)`:
+  - Checks the relation cache for a previous search position (`searchIndex`). If there isn't one (`{-1, -1}`), starts from the relation's first block. If there is one, resumes from the very next slot after the last hit — this is what lets the function be called repeatedly to walk through all matches one at a time, instead of returning everything at once.
+  - Walks the relation's blocks using each block's header (`rblock`) to find the next one, the same way a linked list is traversed.
+  - For each block, checks the slot map first — skips any slot marked unoccupied without wasting time reading it.
+  - For each occupied slot, reads the record and looks up where the target attribute sits inside it (`AttrCacheTable::getAttrCatEntry`), then compares that value against `attrVal` using `compareAttrs`.
+  - If the comparison satisfies whichever operator was passed in (`EQ`, `NE`, `LT`, `LE`, `GT`, `GE`), it saves this position as the new search index (so the *next* call resumes from here) and returns the record's location.
+  - If it runs out of blocks without a match, returns `{-1, -1}`.
 
-### `Buffer/BlockBuffer.cpp` (existing file, updated)
+## Phase 2: The SELECT Operation
 
-*Before this stage, every read went straight to disk. Now it checks memory first.*
+### `Algebra/Algebra.cpp` (new file)
 
-- New function `loadBlockAndGetBufferPtr()`: this is the actual "get me this block" function everything else now calls. It first asks the buffer "do you already have this block?" If yes, use it. If no, find a free slot, actually read from disk into that slot, then use it.
-- `getHeader()`: instead of reading disk directly like it did in Stage 2, it now calls the function above and reads from whatever memory it hands back.
-- `getRecord()`: same change — reads via the buffer instead of the disk.
+*This is where relational operations live. Stage 4 adds the first one — SELECT — plus two small helpers it depends on.*
 
-### `main.cpp`
+- `compareAttrs(attr1, attr2, attrType)`: compares two attribute values and returns negative, zero, or positive — using `strcmp` for STRING attributes and plain subtraction for NUMBER attributes. This one function is what lets `linearSearch` handle both types uniformly instead of branching everywhere.
+- `isNumber(str)`: checks whether a string is purely a valid float, with nothing extra before or after it — used to validate user input before treating it as a NUMBER value.
+- `Algebra::select(srcRel, targetRel, attr, op, strVal)`:
+  - Resolves `srcRel`'s name to an ID via `OpenRelTable::getRelId` — fails with `E_RELNOTOPEN` if it isn't open.
+  - Looks up the condition attribute's catalog entry to get its type — fails with `E_ATTRNOTEXIST` if the attribute doesn't exist.
+  - Converts `strVal` (always a string from user input) into a proper `Attribute` union — parsed as a float if the attribute is NUMBER (validated with `isNumber`, failing with `E_ATTRTYPEMISMATCH` if it isn't a real number), or copied as-is if it's STRING.
+  - Resets the search index (`RelCacheTable::resetSearchIndex`) so this query starts fresh instead of continuing from some earlier unrelated search.
+  - Prints a header row of attribute names.
+  - Repeatedly calls `BlockAccess::linearSearch` in a loop, printing each matching record until it returns `{-1, -1}`.
+  - Note: this stage only prints results to the console — actually creating `targetRel` as a new relation isn't implemented yet, since that's not permitted by the real spec and comes later.
 
-- Added one line: `StaticBuffer buffer;` right after `Disk disk_run;`. This just makes sure the buffer is switched on (all slots marked empty) before anything tries to use it.
-- Nothing else changed — the program prints the exact same output as Stage 2, just faster under the hood since repeat reads no longer touch disk.
+### `Cache/OpenRelTable.cpp` (updated)
 
-## Key Data Structures
+- `getRelId(relName)`: hardcoded to recognize only two names — the Relation Catalog and Attribute Catalog — returning their fixed IDs. Any other name returns `E_RELNOTOPEN`. Proper lookup of arbitrary relations (searching, opening, assigning a real cache slot) isn't implemented until a later stage.
 
-- **`StaticBuffer`** – the buffer itself. One shared instance for the whole program (it's a static class — no separate objects needed).
-- **`BufferMetaInfo`** – per-slot bookkeeping: is it free, and which block does it hold.
-- **`BlockBuffer` / `RecBuffer`** – same external behavior as Stage 2, just internally rewired to go through the buffer.
+### `Cache/AttrCacheTable.cpp` (updated)
 
-## Outcome
-
-- Reads now check memory before touching disk.
-- No cleanup logic for a full buffer yet (what happens when all 32 slots are used? — not handled until Stage 6).
-- No writing back to disk yet — buffer is read-only this stage.
-- Confirmed: output identical to Stage 2, so the change is invisible from the outside — it's purely a speed/internals improvement.
-
----
-
-## Phase 2: The Catalog Caches
-
-### `Cache/RelCacheTable.cpp` (new file)
-
-*This file lets you look up a relation's catalog info quickly. It doesn't fill the cache — it just reads from it once something else has filled it in.*
-
-- `relCache[12]` — an array with 12 slots, one per relation that can be "open" at once. Each slot holds a pointer to that relation's cached info (or nothing, if the slot's unused).
-- `getRelCatEntry(relId, ...)`: hands back the cached info for a given relation, if it exists. Returns an error if the slot is out of range or empty.
-- `recordToRelCatEntry(...)`: takes a raw record (the way data comes straight off disk) and turns it into a clean, easy-to-use struct — pulling out the relation's name, number of attributes, number of records, which blocks it lives in, etc.
-
-### `Cache/AttrCacheTable.cpp` (new file)
-
-*Same idea as above, but for attributes. Since a relation can have any number of attributes, this isn't a flat array — it's a linked list per relation.*
-
-- `attrCache[12]` — 12 linked-list heads, one per relation slot.
-- `getAttrCatEntry(relId, attrOffset, ...)`: walks the linked list for that relation looking for the attribute at a given position (offset), and returns its info.
-- `recordToAttrCatEntry(...)`: same idea as the relation-catalog version — converts a raw record into a clean struct (attribute name, type, whether it's a primary key, etc).
-
-### `Cache/OpenRelTable.cpp` (new file)
-
-*This is where the caches actually get filled in. The two files above just read — this one writes, once, at startup.*
-
-- Constructor:
-  - Clears out both caches first (marks every slot empty).
-  - Reads the Relation Catalog's own entry off disk, converts it, and stores it in `relCache` slot 0.
-  - Does the same for the Attribute Catalog's entry, stored in slot 1.
-  - Reads all 6 attributes belonging to the Relation Catalog, builds a linked list out of them, stores the list in `attrCache` slot 0.
-  - Does the same for the Attribute Catalog's own 6 attributes, stored in `attrCache` slot 1.
-- Destructor: frees everything that was allocated above (both relation entries, both attribute linked lists), so nothing leaks when the program exits.
-
-### `main.cpp`
-
-- Added `OpenRelTable cache;` — this is what actually triggers the cache-filling logic above. Has to come after `Disk` and `StaticBuffer` since it depends on both.
-- Changed the print loop to pull data through `RelCacheTable::getRelCatEntry()` and `AttrCacheTable::getAttrCatEntry()` instead of reading raw records — output looks identical, just sourced from the cache now instead of a fresh read every time.
+- Added the name-based overload of `getAttrCatEntry(relId, attrName, attrCatBuf)`, alongside the existing offset-based one from Stage 3. Walks the same per-relation linked list, but matches on `attrName` via `strcmp` instead of a numeric offset — this is what `linearSearch` and `select` use to find an attribute by name rather than position.
 
 ## Key Data Structures
 
-- **`RelCacheEntry`** – one relation's catalog info (name, attribute count, record count, block range) plus where it lives on disk.
-- **`AttrCacheEntry`** – one attribute's info (name, type, etc), plus a pointer to the next attribute in the list — because a relation can have any number of them.
-- **`RelCacheTable` / `AttrCacheTable`** – just hold the arrays and provide lookup/conversion functions. No setup logic of their own.
-- **`OpenRelTable`** – the only class that actually does something at startup (fills the caches) and cleanup at shutdown (frees them).
+- **`RecId`** – a `{block, slot}` pair identifying exactly one record's location. What `linearSearch` returns.
+- **`Attribute`** – the union already in use from earlier stages; here it's what condition values and record fields are compared as.
+- **`searchIndex`** – per-relation state in `RelCacheTable` that makes `linearSearch` resumable across repeated calls.
 
 ## Outcome
 
-- Relation Catalog and Attribute Catalog info is now sitting in memory from the start, instead of being re-read every time it's needed.
-- Only these two catalogs are cached so far — being able to cache *any* relation comes in Stage 5.
-- Everything allocated gets properly freed — no memory leaks for what's implemented here.
-- Output still matches Stage 2/Phase 1 exactly.
-
----
-
-## Exercise Q1 — Also Caching the `Students` Relation
-
-*Goal: make the cache hold a normal user-created relation too, not just the two system catalogs. Unlike RELCAT/ATTRCAT, `Students` doesn't live at a known, fixed spot — so we have to search for it.*
-
-### `Cache/OpenRelTable.cpp`
-
-- Gave `Students` slot number 2 in the cache (right after RELCAT=0 and ATTRCAT=1).
-- Added to the constructor, after the existing setup:
-  - **Finding Students in the Relation Catalog:** loop through every record in the Relation Catalog block, checking each one's name against `"Students"`. When found, remember which slot it was in.
-  - Convert and store that entry in `relCache` slot 2, same way as before.
-  - **Finding Students' attributes:** this time we can't assume everything fits in one block — if enough relations have been created, the Attribute Catalog might overflow into a second (or third) block. So we follow the "next block" pointer in each block's header and check every block, not just the first, for any attribute belonging to `Students`.
-  - Build a linked list out of whatever attributes we find, store it in `attrCache` slot 2.
-  - All of this only runs if `Students` was actually found — if it wasn't created yet, this part is skipped safely instead of crashing.
-- Updated the destructor to loop over all three used slots (0, 1, 2) instead of hardcoding just the first two, so `Students`' memory gets freed too.
-
-### `main.cpp`
-
-- Extended the print loop to also cover slot 2, so `Students` gets printed along with the two catalogs.
-- Added a safety check — if a slot turns out to be empty (relation wasn't found), skip it instead of crashing.
-- Didn't add any manual linked-list walking here — attribute lookups still go through `getAttrCatEntry()`, which already knows how to search the list. `main.cpp` doesn't need to know or care that attributes are stored as a linked list under the hood.
-
-## Outcome
-
-- `Students` now gets cached and printed automatically at startup, found by searching rather than assuming a fixed location.
-- Works correctly even if the Attribute Catalog has grown past one block (from creating other relations earlier).
-- No memory leaks — cleanup now covers all three cached relations.
-- Verified: program prints RELATIONCAT, ATTRIBUTECAT, and Students (with all its attributes) in one run.
+- Can now search a relation for records matching a condition (`=`, `≠`, `<`, `≤`, `>`, `≥`) without manually touching blocks or slots.
+- `SELECT` works, but **only on `RELATIONCAT` and `ATTRIBUTECAT`** — user-created relations like `Students` can't be opened or queried yet, since `getRelId` is still hardcoded to just the two catalogs.
+- Results are printed straight to the console, not written into a new relation — that's a later-stage limitation, consistent with the spec note that direct console output isn't the final behavior.
+- No changes to how relations are created, opened, or modified — this stage is purely about *reading* via search.

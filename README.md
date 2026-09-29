@@ -1,55 +1,155 @@
-# Stage 5 — Opening Arbitrary Relations
+# Stage 6 — Buffer Management and Disk Write-back
 
 ## Goal
 
-Stage 4 left a hard limitation: `SELECT` only worked on `RELATIONCAT` and `ATTRIBUTECAT`, because `OpenRelTable::getRelId` was hardcoded to recognize just those two names. This stage removes that restriction — it builds real relation-opening machinery, so any relation on disk (`Students`, `Events`, etc.) can be opened into a free cache slot, searched, and closed again, using the same `BlockAccess`/`Algebra` layers built in Stage 4 without any changes to them.
+Everything up to Stage 5 was read-only: blocks were loaded from disk into `StaticBuffer` and never modified. This stage introduces the first operations that change data and persist it. It implements `ALTER TABLE RENAME` (rename a relation) and `ALTER TABLE RENAME COLUMN` (rename an attribute), and adds the buffer machinery they depend on: a dirty bit, LRU block replacement, and write-back of modified blocks to disk when they are evicted or when the program exits.
 
-## Phase 1: Tracking Which Relations Are Open
+## Background
 
-### `Cache/OpenRelTable.cpp` (updated)
+### Block Replacement (LRU)
 
-*What changed: alongside the existing `relCache`/`attrCache` arrays, this stage introduces `tableMetaInfo` — bookkeeping for which of the 12 cache slots are free and which relation name occupies each occupied one.*
+- `StaticBuffer` holds 32 blocks at a time. When a new block is needed and every slot is occupied, an existing slot must be reused.
+- NITCbase uses **LRU (Least Recently Used)**. Each buffer entry carries a `timeStamp` measuring how long it has gone unused, and the entry with the highest timestamp is the one replaced.
+- Each entry also has a boolean `dirty` field.
+  - `dirty = true` means the block was modified after being loaded.
+  - A dirty block is written back to disk when it is replaced or when the system exits.
+- Key idea: evict the least recently used block, but persist its changes first if it is dirty.
+# Stage 6 — Buffer Management and Disk Write-back
 
-- Constructor: now also initializes every `tableMetaInfo` slot to free, then immediately marks `RELCAT_RELID` and `ATTRCAT_RELID` as permanently occupied with their names set — these two never get closed or reassigned, since every other operation depends on them staying loaded.
-- Destructor: unchanged in spirit — still frees slots 0 and 1 directly, and now also closes any other relation left open (rel-id ≥ 2) via `closeRel` before the program exits, so nothing leaks regardless of what the user opened during the session.
+## Goal
 
-## Phase 2: Opening and Closing Relations
+Until Stage 5 everything was read-only. This stage adds the first operations that modify data and persist it: `ALTER TABLE RENAME` (relation) and `ALTER TABLE RENAME COLUMN` (attribute). To support them, the buffer gets a dirty bit, LRU block replacement, and write-back of modified blocks on eviction or exit.
 
-### `Cache/OpenRelTable.cpp` (new functions)
+Call flow: `Frontend → Schema → BlockAccess → Buffer`. Renaming is a schema operation, so the relation must be **closed** first.
 
-- `getFreeOpenRelTableEntry()`: scans `tableMetaInfo` from slot 2 onward (0 and 1 are reserved for the catalogs) and returns the first free slot, or `E_CACHEFULL` if all 12 are occupied.
+## Phase 1: LRU and Dirty Bit in the Buffer Layer
 
-- `getRelId(relName)`: rewritten from Stage 4's two-name hardcode into a real lookup — scans every occupied `tableMetaInfo` slot for a name match and returns its rel-id, or `E_RELNOTOPEN` if the relation isn't currently open. This is what unblocks `Algebra::select` for arbitrary relations, since `select` was already written generically against `getRelId` — it never needed to change.
+### `Buffer/StaticBuffer.cpp` (updated)
 
-- `openRel(relName)`: the core addition this stage.
-  - Returns the existing rel-id immediately if the relation is already open, so nothing gets opened twice.
-  - Grabs a free slot via `getFreeOpenRelTableEntry`.
-  - Uses `BlockAccess::linearSearch` on `RELCAT_RELID` to find the relation's own entry in the relation catalog by name — reusing Stage 4's search layer rather than manually scanning blocks.
-  - Loads that entry into `relCache` at the new rel-id.
-  - Loops `linearSearch` on `ATTRCAT_RELID`, once per expected attribute (`numAttrs` from the entry just loaded), building a linked list of that relation's attributes into `attrCache` — same resumable-search pattern `select` itself uses to walk multiple matches.
-  - Marks the slot occupied in `tableMetaInfo` with the relation's name.
+- Buffer holds 32 blocks. Each slot tracks `free`, `dirty`, `timeStamp` (time since last use) and `blockNum`.
+- Constructor: initializes all slots as free and clean.
+- Destructor: writes back every dirty occupied slot via `Disk::writeBlock`.
+- `getFreeBuffer(blockNum)`: ages all occupied slots, uses a free slot if any, otherwise evicts the slot with the highest timestamp (writing it back first if dirty). Resets the new slot's timestamp to 0.
+- `setDirtyBit(blockNum)`: marks the slot holding that block dirty; `E_BLOCKNOTINBUFFER` if it isn't buffered.
 
-- `closeRel(relId)`:
-  - Refuses to close `RELCAT_RELID` or `ATTRCAT_RELID` (`E_NOTPERMITTED`) — the catalogs must stay open for the program's lifetime.
-  - Validates `relId` is in range and actually open, failing with `E_OUTOFBOUND` / `E_RELNOTOPEN` otherwise.
-  - Frees the `relCache` entry and walks/frees the entire `attrCache` linked list for that rel-id — every `malloc` from `openRel` gets exactly one matching `free`.
-  - Resets the slot to free and nulls out both cache pointers, so the slot is safely reusable by a future `openRel` call.
+### `Buffer/BlockBuffer.cpp` and `RecBuffer.cpp` (updated)
 
-### `Schema/Schema.cpp` (new)
+- `loadBlockAndGetBufferPtr()`: on a hit, resets that slot's timestamp and ages the rest; on a miss, gets a slot from `getFreeBuffer` and reads the block from disk.
+- `RecBuffer::setRecord(record, slotNum)`: validates the slot, copies the record into the buffer, calls `setDirtyBit`.
 
-- `Schema::openRel(relName)`: thin wrapper — calls `OpenRelTable::openRel`, translates a non-negative rel-id into `SUCCESS`, and passes any error code straight through. This is what the frontend's `OPEN TABLE` command actually calls.
-- `Schema::closeRel(relName)`: blocks closing either catalog by name before even doing a lookup, otherwise resolves the name via `getRelId` and delegates to `OpenRelTable::closeRel`.
+## Phase 2: Renaming
 
-## Key Data Structures
+### `BlockAccess/BlockAccess.cpp` (new functions)
 
-- **`OpenRelTableMetaInfo`** – per-slot bookkeeping added this stage: whether the slot is free, and if not, which relation's name occupies it. This is what makes `getRelId` and `getFreeOpenRelTableEntry` possible — Stage 4 had no concept of "currently open relations" beyond two hardcoded IDs.
-- **`relCache` / `attrCache`** – same structures from Stage 3, now populated dynamically by `openRel` for any relation instead of only being hand-filled in the constructor for the catalogs (and `Students`, as a one-off Stage 3 exercise).
+Both reuse `linearSearch` on the catalogs plus `getRecord`/`setRecord`.
+
+- `renameRelation(old, new)`: fails with `E_RELEXIST` if `new` exists or `E_RELNOTEXIST` if `old` doesn't. Rewrites the name in the `RELCAT` record, then in every matching `ATTRCAT` record.
+- `renameAttribute(rel, old, new)`: scans the relation's `ATTRCAT` entries; `E_ATTREXIST` if `new` already exists, `E_ATTRNOTEXIST` if `old` isn't found, otherwise rewrites that entry.
+
+### `Schema/Schema.cpp` (new functions)
+
+- `Schema::renameRel` / `Schema::renameAttr`: reject the catalogs (`E_NOTPERMITTED`), reject open relations (`E_RELOPEN`), then delegate to BlockAccess.
+- `Frontend::alter_table_rename()` and `alter_table_rename_column()` call these.
 
 ## Outcome
 
-- Any relation on disk can now be opened (`OPEN TABLE <name>`), searched (`SELECT`), and closed (`CLOSE TABLE <name>`) — `Algebra::select` from Stage 4 needed zero changes, since it was always written against the generic `getRelId`/`linearSearch` interface.
-- Opening a relation that doesn't exist correctly fails, rather than silently reporting success — a real check now backs the operation instead of a placeholder message.
-- Opening an already-open relation returns the same rel-id rather than duplicating cache entries.
-- Closing a relation properly frees every allocation made when it was opened — no leaks, verified by matching every `malloc` in `openRel` to a `free` in `closeRel`.
-- The catalogs remain permanently open and cannot be closed, matching the constraint that every other cache lookup depends on them.
-- Two easy-to-hit setup bugs worth remembering: forgetting to actually define the static `tableMetaInfo` array (`OpenRelTable::tableMetaInfo`, not a stray `static` file-scope variable of the same name) causes linker errors; forgetting to initialize `tableMetaInfo` slots as free in the constructor makes every `OPEN TABLE` fail with `E_CACHEFULL` immediately, since uninitialized struct memory reads as "not free."
+- Both rename commands work and persist across restarts.
+- Bad renames (duplicate name, missing relation/attribute, open relation, catalogs) fail cleanly with an error.
+- Modified blocks reach disk on eviction or in the `StaticBuffer` destructor.
+- Common bugs: no `setDirtyBit` in `setRecord` (rename lost after exit); timestamps not reset on a cache hit (LRU evicts hot blocks); search index not reset between `linearSearch` calls (misses entries).
+### Call Flow
+
+`Frontend → Schema → Block Access → Buffer`
+
+- `Frontend::alter_table_rename()` → `Schema::renameRel()` → `BlockAccess::renameRelation()`
+- `Frontend::alter_table_rename_column()` → `Schema::renameAttr()` → `BlockAccess::renameAttribute()`
+
+Renaming is a **schema-level** operation, so it is handled by the Schema Layer. The relation must be **closed** before its schema can be modified.
+
+## Phase 1: Dirty Bit and LRU in the Buffer Layer
+
+### `Buffer/StaticBuffer.cpp` (updated)
+
+*What changed: the buffer now tracks recency and modification per slot, and can evict a block instead of only filling free slots.*
+
+- Constructor: initializes every `metainfo` slot as free, not dirty, with no block assigned and timestamp reset.
+- Destructor: now walks all slots and writes back every occupied slot whose `dirty` bit is set via `Disk::writeBlock`, so nothing modified is lost at exit.
+- `getFreeBuffer(blockNum)`:
+  - Increments the timestamp of every occupied slot, since one more access has passed for them.
+  - Uses a free slot if one exists; otherwise picks the occupied slot with the highest timestamp (the LRU victim).
+  - If the victim is dirty, writes it back to disk before reusing the slot.
+  - Marks the chosen slot as holding `blockNum`, not dirty, with timestamp 0, and returns its buffer index.
+- `setDirtyBit(blockNum)`: looks up the buffer slot holding `blockNum` and sets its `dirty` flag. Returns `E_BLOCKNOTINBUFFER` if the block isn't in the buffer and `E_OUTOFBOUND` for an invalid index.
+
+### `Buffer/BlockBuffer.cpp` (updated)
+
+- `loadBlockAndGetBufferPtr()`:
+  - If the block is already in the buffer, it counts as a fresh access: its timestamp is reset to 0 and every other occupied slot's timestamp is incremented.
+  - If it is not in the buffer, it calls `StaticBuffer::getFreeBuffer` (which may trigger an eviction plus write-back) and then reads the block from disk into that slot.
+
+### `Buffer/RecBuffer.cpp` (new function)
+
+- `RecBuffer::setRecord(record, slotNum)`:
+  - Gets the block's buffer pointer through `loadBlockAndGetBufferPtr`.
+  - Validates `slotNum` against the block's slot count.
+  - Copies the record into that slot's position in the buffer.
+  - Calls `StaticBuffer::setDirtyBit` so the change is persisted on eviction or exit.
+  - The mirror image of `getRecord`, which only reads.
+
+## Phase 2: Renaming in the Block Access Layer
+
+### `BlockAccess/BlockAccess.cpp` (new functions)
+
+Both functions reuse Stage 4's `linearSearch` to locate catalog entries instead of scanning blocks by hand, and use `getRecord` / `setRecord` for the read-modify-write.
+
+- `renameRelation(oldName, newName)`:
+  - Resets the search index on `RELCAT_RELID`, then searches `RELCAT` for `newName`. If it exists, fails with `E_RELEXIST`.
+  - Resets the search index again and searches `RELCAT` for `oldName`. If not found, fails with `E_RELNOTEXIST`.
+  - Reads that record, overwrites the relation-name field with `newName`, and writes it back with `setRecord`.
+  - Loops `linearSearch` on `ATTRCAT` matching `oldName` in the relation-name field, and rewrites every attribute entry of that relation with `newName`. The loop runs until `linearSearch` reports no more matches.
+- `renameAttribute(relName, oldName, newName)`:
+  - Confirms `relName` exists in `RELCAT` (`E_RELNOTEXIST` otherwise).
+  - Walks all `ATTRCAT` entries of `relName` with `linearSearch`, checking each attribute name.
+    - If an entry already has `newName`, fails with `E_ATTREXIST`.
+    - Remembers the location of the entry whose name equals `oldName`.
+  - If no entry matched `oldName`, fails with `E_ATTRNOTEXIST`.
+  - Otherwise overwrites the attribute-name field of the remembered entry and writes it back with `setRecord`.
+
+The modified catalog blocks are not written to disk here; they are marked dirty and flushed later by the Buffer Layer.
+
+## Phase 3: Schema and Frontend
+
+### `Schema/Schema.cpp` (new functions)
+
+- `Schema::renameRel(oldName, newName)`:
+  - Blocks renaming either catalog (`E_NOTPERMITTED`).
+  - Checks whether the relation is currently open via `OpenRelTable::getRelId`. If it is, fails with `E_RELOPEN`, because the cached catalog entries would go stale.
+  - Delegates to `BlockAccess::renameRelation` and passes its result straight back.
+- `Schema::renameAttr(relName, oldAttr, newAttr)`:
+  - Blocks modifying the catalogs (`E_NOTPERMITTED`).
+  - Requires the relation to be closed (`E_RELOPEN` otherwise).
+  - Delegates to `BlockAccess::renameAttribute`.
+
+### `Frontend/Frontend.cpp` (updated)
+
+- `Frontend::alter_table_rename()` calls `Schema::renameRel`.
+- `Frontend::alter_table_rename_column()` calls `Schema::renameAttr`.
+- Both print a success message on `SUCCESS` and otherwise map the error code to a readable message.
+
+## Key Data Structures
+
+- **`StaticBuffer::metainfo` (`BufferMetaInfo`)** – per-slot bookkeeping: whether the slot is free, whether it is dirty, its `timeStamp` for LRU, and which disk block it holds. The Stage 3/4 buffer only needed the free flag and block number; `dirty` and `timeStamp` are what make write-back and replacement possible.
+- **Catalog records** – unchanged in layout. Renaming just overwrites the name field of an existing `RELCAT` record and of every matching `ATTRCAT` record.
+
+## Outcome
+
+- A relation can be renamed with `ALTER TABLE RENAME <old> TO <new>`, and a column with `ALTER TABLE RENAME <rel> COLUMN <old> TO <new>`. The change is visible in `RELCAT` / `ATTRCAT` and survives after the program exits.
+- Renaming to a name that already exists, or renaming something that doesn't exist, fails with the matching error instead of corrupting the catalogs.
+- Renaming an open relation is refused, and the catalogs themselves cannot be renamed.
+- When all 32 buffer slots are full, the least recently used block is evicted, and it is written back first if dirty.
+- Every block modified during the session reaches disk by the end of the run, either at eviction time or in the `StaticBuffer` destructor.
+- Nothing above Block Access needed structural changes: rename reuses `linearSearch` and `getRecord` from earlier stages, and the only truly new primitives are `setRecord`, `setDirtyBit`, and LRU in `getFreeBuffer`.
+- Easy-to-hit bugs worth remembering:
+  - Forgetting to call `setDirtyBit` in `setRecord` makes the rename appear to work in-session but vanish after restart, since the block is never flushed.
+  - Forgetting to reset timestamps in `loadBlockAndGetBufferPtr` on a cache hit makes LRU evict blocks that were just used.
+  - Not resetting the search index before each `linearSearch` in the rename functions makes the search resume from the previous hit and miss entries.

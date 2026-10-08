@@ -58,6 +58,7 @@ int Schema::renameAttr(char relName[ATTR_SIZE], char oldAttrName[ATTR_SIZE], cha
     // check if relation is closed or not
     int relId = OpenRelTable::getRelId(relName);
     if(relId >=0){
+  
         return E_RELOPEN;
     }
 

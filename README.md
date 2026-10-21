@@ -1,83 +1,94 @@
-# Stage 8:  Creating and Deleting Relations
+# Stage 9: Selection and Projection on Relations
+### GOALS
+Previous stages:  linear search , rudimentary version of SELECT
+Now: Complete implentation fo SELECT + PROJECTION
 
-  - Previously: insert records into exising relations
+ NITCbase specification 0f 
+ SELECT : selecting records from a relation that satisfy a specific condition and writing those records into a newly created relation of a specified name.
+  PROJECT : pick a subset of columns from the relation,  result in the creation of a new relation with a subset of the attributes of the source relation. 
 
-- Now: Create and delete relations
 
-  
-- Creating a relation -> inserting records into the relation catalog and the attribute catalog
+Following commands added
 
-- Implemented in the Schema Layer and the Block Access Layer -> CREATE TABLE command.
-
- 
-- Deleting a relation -> DROP TABLE command.
-
-- Freeing all the blocks used to store the record of the relation and removing all the records corresponding to the relation from the catalogs.
-
-- Note: NITCbase only allows you to delete a relation as a whole and does not allow the deletion of individual records from a relation
+|Frontend User Interface Command|Operation|
+|---|---|
+|SELECT * FROM RelName INTO TargetName WHERE Attribute `op` value|selection|
+|SELECT * FROM RelName INTO TargetName|projection (clone relation)|
+|SELECT Attr1,Attr2 FROM RelName INTO TargetName|projection|
+|SELECT Attr1,Attr2 FROM RelName INTO TargetName WHERE Attr `op` value|selection **and** projection|
 ---
 
-### 1. Frontend. cpp 
-	- create_table -> calls Schema Layer createRel(relname, no_attrs, attributes, type_attrs)
-	- drop_table -> calls Schema Layer deleteRel(relname);
+#### 1. Frontend.cpp
+	- select_from_table -> project(relname_source, relname_target);
+	- select_attrlist_from_table -> project(relname_source, relname_target, attr_count, attr_list);
+	- select_from_table_where -> select(relname_source, relname_target, attribute, op, value);
+	- select_attrlist_from_table_where -> select(relname_source, TEMP, attribute, op, value), then openRel(TEMP), then project(TEMP, relname_target, attr_count, attr_list), then closeRel(tempRelId) and Schema::deleteRel(TEMP)
 
-### 2.  Schema.cpp
-##### creatRel 
-	- check if relName exist already or not (linear search relaion catalog)
-	- see if any attribute names submitted repeat (regular for loop)
-	- create a record with the relation catalog, with relName, nAttrs, rest default
-	- insert the record into relation catalog (use BlockAcess::insert())
-	- loop and insert attribute catalog records with relName, attrName, attrType, rest default (BlockAccess:: insert())
+#### 2. Algebra.cpp
+##### select
+	OLD:
+	- get RelId os the relation (OpenRelTable : getRelId)
+	- get attrCat entry for the attribute in comparison (AttrCacheTable:getAttrcatEntry)
+	- do appropriate type conversion of the value to compare against
+	- get RelCacheTable: RelCateEntry (use it to get no. of attributes )
+	- print a header for the table
+	- loop: 
+			- linearsearch, print each time RecId is returned
 
-##### deleteRel
-	- if relname == attrCat or relCat, not allowed
-	- check if relation opened (only delete closed relations)
-	- call BlockAccess::deleteRelation
-	
-#### 3. OpenReltable.cpp
+	NEW:
+	- get RelId os the relation (OpenRelTable : getRelId)
+	- get attrCat entry for the attribute in comparison (AttrCacheTable:getAttrcatEntry)
+	- do appropriate type conversion of the value to compare against
+	- create and open target relation:
+		- create a RelCatEntry for it, set numEntries, same as srcRel
+		- make a 2d array with attributes of srcRel and 1d array with their types
+		- then Schema:creatRel(targetRelName, src_nAttr, attr_names, attr_type)
+		- if it fails deleteRel
+		- then OpenRel(targetRelName)
+	- Loop:
+		- BlockAcess:search, insert the record into TargetRel insert()
+		- then close targetRel
 
-##### ~OpenRelTable
-	Previously:
-	- close all open relations from rel-id=2 (OpenRelTable::closeRel())
-	- free relationCache and Attribute Cache
-	
-	Now Additionally:
-	- before freeing, write back the relation cache entries of ATTRCAT (rel-id 1) and RELCAT (rel-id 0) if their dirty flag is set
-	  - write it back with RecBuffer(recId.block).setRecord(relCatRecord, recId.slot)
-	- then free relCache[ATTRCAT_RELID] and relCache[RELCAT_RELID]
-	- free the attribute cache entries of rel-id 0 and 1 (no write-back needed, since the attributes of the catalogs never change)
+##### project  (no attributes listed)
+	- open srcRel, get RelCatEntry and get numAttrs
+	- make 2d, 1d copy of attribute and and type
+	- create and open target rel using these
+	- loop: 
+		- if project(srcRelId, record) is successful: insert record into targetRel
+	- close targetRel
+##### project (with a list of particular attributes (overload))
+	- open srcRel, get RelCatEntry and get numAttrs
+	- loop thru the passed list of attributes, getAttrCateEntry using their names, and make a list of attr_types and attr_offsets of those attrs
+	- Create and open target relation
+	- Loop:
+		- if project(srcRelId, record) is successful, INSERT ONLY ATTRIBUTES OF THAT RECORD corresponding to attr_offset into targetRel
+	- close TargetRel
 
-#### 4. BlockBuffer.cpp
+#### BlockAcess.cpp 
 
-##### releaseBlock
-	 - check for valid block number
-	 - if block is in buffer, free the buffer : set metainfo.free=true
-	 - then free blocj on disk(always) :set blockAllocMap=UNUSED_BLK
-	 - mark the object as invalid(this->blockNum = INVALID_BLOCKNUM;)
-#### 5. BlockAccess.cpp
-##### search(int relId, Attribute  record, char attrName[ATTR_SIZE], Attribute attrVal, int op);
-	- copy the result of a linearsearch into a "record" argument
-	- linear search with the arguments passed
-	- getRecord the corresponding returned RecId into record
+##### project(relId, record)  //just returns the next full row in the table
+	- get the previous search index (RecId) of the relation from the relation cache
+	- if it is {-1, -1} (search was reset), start from the first record block of the relation, slot 0
+	- else continue from the same block, slot + 1
+	- loop from (block, slot) to find the next occupied slot:
+		- if slot >= numSlots, move to the next block (rblock), slot = 0
+		- else if slotMap[slot] is SLOT_UNOCCUPIED, slot++
+		- else, found, break
+	- if block == -1, all records are over, return E_NOTFOUND
+	- set the search index to the found RecId, so the next call continues after it
+	- get the record at that RecId into `record` (always the full record), return SUCCESS
 
-##### deleteRel
-	- cannot delete attrCat and RelCat
-	- linearsearch RelCta for the relation and getRecord it
-	- get firstBlk and no. ofattributes
-	- go through linked list of blocks, delete each one with releaseBlock
-	- loop:
-		-linearsearch attrCat for attribute of the relation (break if done)
-		- getheader adn getrecord for that RecId
-		- update slotMap to unoccupied for that slot
-		- decrement numEntries in block header (if it becoes 0, linked list delete the block: get left bloc and set rblock as rblock of current, if it is the lastBlk update RelCat Entry for LastBlk, then release block)
-	- getHeader of RelCat, decrement no of entries, set slotmap unoccupied, update the same in relationCacheTable
-	- updateattrCache by decrementing no. of entries by no. of attributes deleted
+//here we're using set search index to remeber the last valid recird that we accessed
 
 
-#### EXCERCISE 
-tests: 
-- Creates 4 relations (Products, Sales, Bills, Stores) and checks their RELCAT and ATTRCAT entries
-- Opens and populates Products and Stores from CSVs, then queries Stores by owner
-- Closes and drops Products, Sales, Bills
-- Confirms their RELCAT entries are gone
-- Overall: tests that `createRel` and `deleteRelation` keep the catalogs consistent
+## EXCERCISE: 1
+CREATE TABLE Toys(id NUM, name STR, colour STR, stock NUM)
+OPEN TABLE Toys
+INSERT INTO Toys VALUES FROM toys.csv
+SELECT name,colour FROM Toys INTO ToyColours
+SELECT * FROM Toys INTO ToysForSale WHERE stock > 3000
+SELECT * FROM Toys INTO ToysToReorder WHERE stock <= 1000
+SELECT * FROM Toys INTO ToysCopy
+SELECT id,name FROM Toys INTO BlueToys WHERE colour = blue
+
+

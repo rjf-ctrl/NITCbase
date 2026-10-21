@@ -1,5 +1,4 @@
-# Stage 7: Record Insertion and Cache Write-back
-## Goal
+# Stage 8:  Creating and Deleting Relations
 
   - Previously: insert records into exising relations
 

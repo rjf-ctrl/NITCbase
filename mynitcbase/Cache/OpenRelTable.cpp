@@ -105,6 +105,13 @@ OpenRelTable:: OpenRelTable() {
 
 }
 
+/*
+  Destructor of OpenRelTable.
+  Closes all user relations (rel-id >= 2) using closeRel(), which writes back dirty entries.
+  The catalogs (rel-id 0 and 1) are never closed that way, so here we write back their
+  relation cache entries if dirty (create/drop changes their NumRecords), then free them.
+  Attribute cache of the catalogs is only freed, since it never changes.
+*/
 
 OpenRelTable::~OpenRelTable(){
 
@@ -115,23 +122,49 @@ OpenRelTable::~OpenRelTable(){
         }
     }
 
-    // free all the memories that is allocted in the constructor
-    for(int i = 0; i<MAX_OPEN; i++){
-        if(RelCacheTable::relCache[i] != nullptr){
-            free(RelCacheTable::relCache[i]);
-            RelCacheTable::relCache[i] = nullptr;
-        }
-        if(AttrCacheTable::attrCache[i] != nullptr){
-            struct AttrCacheEntry* attrCacheEntry = AttrCacheTable::attrCache[i];
-            while(attrCacheEntry != nullptr){
-                struct AttrCacheEntry* tempCacheEntry = attrCacheEntry;
-                attrCacheEntry = attrCacheEntry->next;
-                free(tempCacheEntry);
-            }
-            AttrCacheTable::attrCache[i] = nullptr;
+    
+    if (RelCacheTable::relCache[ATTRCAT_RELID]->dirty == true){
+        
+        RelCatEntry relCatEntry = RelCacheTable::relCache[ATTRCAT_RELID]->relCatEntry;
+        Attribute relCatRecord[RELCAT_NO_ATTRS];
+        RelCacheTable::relCatEntryToRecord(&relCatEntry, relCatRecord);
+
+        // get the record id form the relCache, it stores where the relation is present in Relation Catalog
+        RecId recId = RelCacheTable::relCache[ATTRCAT_RELID]->recId;
+        RecBuffer relCatBlock(recId.block);
+
+        // write back to the buffer using relCatBlock.setRecord()
+        relCatBlock.setRecord(relCatRecord, recId.slot);
+    }
+    // free the memory which was dynamically allocted to to relCache[ATTRCAT_RELID]
+    free(RelCacheTable::relCache[ATTRCAT_RELID]);
+
+    if(RelCacheTable::relCache[RELCAT_RELID]->dirty == true){
+        
+         RelCatEntry relCatEntry = RelCacheTable::relCache[RELCAT_RELID]->relCatEntry;
+         Attribute relCatRecord[RELCAT_NO_ATTRS];
+         RelCacheTable::relCatEntryToRecord(&relCatEntry, relCatRecord);
+
+         RecId recId = RelCacheTable::relCache[RELCAT_RELID]->recId;
+         RecBuffer relCatBlock(recId.block);
+         relCatBlock.setRecord(relCatRecord, recId.slot);
+    }
+    free(RelCacheTable::relCache[RELCAT_RELID]);
+
+
+    // free the memory allocated for the attribute cache entries of the relation catalog and the attribute catalog
+    // NOTE: they are never changed because the attributes of relcat and attrcat are never modified.
+    for(int i = 0; i < 2; i++){
+        struct AttrCacheEntry *entry = AttrCacheTable::attrCache[i];
+        while(entry != nullptr){
+            struct AttrCacheEntry *temp = entry;
+            entry = entry->next;
+            free(temp);
         }
     }
+
 }
+
 
 
 /* This function will open a relation having name `relName`.

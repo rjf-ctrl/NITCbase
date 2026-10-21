@@ -61,9 +61,7 @@ int BlockBuffer :: getHeader(struct HeadInfo *head) {
     return SUCCESS;
 }
 
-/*
-    BlockBuffer::setHeader() => used to set the header of the block
-*/
+// BlockBuffer::setHeader() => used to set the header of the block
 int BlockBuffer::setHeader(struct HeadInfo *head){
 
     unsigned char *bufferPtr;
@@ -89,11 +87,11 @@ int BlockBuffer::setHeader(struct HeadInfo *head){
     return ret; // either success or the error code will be returned.
 }
 
-/*
-    BlockBuffer::setBlockType()
-    set the type of the block with the input block type. This method sets the type in both the
-    header of the block and also in the block allocation map.
-*/
+
+    //BlockBuffer::setBlockType()
+    //set the type of the block with the input block type. This method sets the type in both the
+    //header of the block and also in the block allocation map.
+
 int BlockBuffer::setBlockType(int blockType){
 
     unsigned char *bufferPtr;
@@ -360,5 +358,24 @@ int compareAttrs(union Attribute attr1, union Attribute attr2, int attrType){
     }
     else{
         return 0;
+    }
+}
+
+
+void BlockBuffer::releaseBlock(){
+    // if blockNum is INVALID_BLOCKNUM, skip
+    if(this->blockNum != INVALID_BLOCKNUM){
+        int bufferNum = StaticBuffer::getBufferNum(this->blockNum);
+
+        // if block is in the buffer, free the buffer
+        if(bufferNum != E_BLOCKNOTINBUFFER){
+            StaticBuffer::metainfo[bufferNum].free = true;
+        }
+
+        // free the block on disk (always)
+        StaticBuffer::blockAllocMap[this->blockNum] = UNUSED_BLK;
+
+        // mark this object as invalid
+        this->blockNum = INVALID_BLOCKNUM;
     }
 }

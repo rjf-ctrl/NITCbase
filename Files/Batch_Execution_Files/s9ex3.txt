@@ -1,0 +1,10 @@
+CREATE TABLE QuizMarks(rollNo STR, name STR, cgpa NUM, quizMarks NUM, location STR)
+OPEN TABLE QuizMarks
+INSERT INTO QuizMarks VALUES FROM quizmarks.csv
+SELECT * FROM QuizMarks INTO HighCgpa WHERE cgpa > 8
+OPEN TABLE HighCgpa
+SELECT * FROM HighCgpa INTO Eligible WHERE quizMarks > 85
+OPEN TABLE Eligible
+SELECT rollNo,name FROM Eligible INTO KeralaEligible WHERE location = Kerala
+SELECT rollNo,name FROM Eligible INTO GujaratEligible WHERE location = Gujarat
+SELECT rollNo,name FROM Eligible INTO TelanganaEligible WHERE location = Telangana

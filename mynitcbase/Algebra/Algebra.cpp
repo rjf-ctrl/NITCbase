@@ -22,13 +22,13 @@ int Algebra::select(char srcRel[ATTR_SIZE], char targetRel[ATTR_SIZE], char attr
 
     AttrCatEntry attrCatEntry;
     // get the attribute catalog entry for attr, using AttrCacheTable::getAttrcatEntry()
-
+    //    return E_ATTRNOTEXIST if it returns the error
     int ret = AttrCacheTable::getAttrCatEntry(srcRelId, attr, &attrCatEntry);
 	if (ret == E_ATTRNOTEXIST) {
 		return E_ATTRNOTEXIST;
 	}
     
-    //Convert input strVal (string) to an attribute of data type NUMBER or STRING
+    /*** Convert input strVal (string) to an attribute of data type NUMBER or STRING ***/
     int type = attrCatEntry.attrType;
     Attribute attrValue;
     if(type == NUMBER){
@@ -43,7 +43,7 @@ int Algebra::select(char srcRel[ATTR_SIZE], char targetRel[ATTR_SIZE], char attr
         strcpy(attrValue.sVal, strVal);
     }
 
-    // Creating and opening the target relation 
+    /*** Creating and opening the target relation ***/
     // prepare arguments for createRel() in the following way:
     // get RelcatEntry of srcRel using
     RelCatEntry relCatEntry;
@@ -81,7 +81,7 @@ int Algebra::select(char srcRel[ATTR_SIZE], char targetRel[ATTR_SIZE], char attr
 
     Attribute record[src_nAttrs];
     RelCacheTable::resetSearchIndex(srcRelId);
-    // AttrCacheTable::resetSearchIndex(srcRelId); (in upcoming stages)
+    AttrCacheTable::resetSearchIndex(srcRelId,attr);
 
     while(BlockAccess::search(srcRelId, record, attr, attrValue, op) == SUCCESS){
         int ret = BlockAccess::insert(targetRelId, record);

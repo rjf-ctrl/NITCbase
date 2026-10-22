@@ -46,8 +46,7 @@ RecId BlockAccess::linearSearch(int relId, char attrName[ATTR_SIZE], union Attri
         // get slot map of the block using RecBuffer::getSlotMap()
         struct HeadInfo head;
         recBuffer.getHeader(&head);
-        Attribute record[head.numAttrs];
-        recBuffer.getRecord(record,slot);
+        
         unsigned char slotMap[head.numSlots];
         recBuffer.getSlotMap(slotMap);
 
@@ -60,10 +59,12 @@ RecId BlockAccess::linearSearch(int relId, char attrName[ATTR_SIZE], union Attri
             continue;
         }
         /*
-            my notes: if it is end of the record in a relation, this 
+            if it is end of the record in a relation, this 
             loop will continue to reach the end of the block,
             eventually block = head.rblock = -1 and loop will terminate.
         */
+        Attribute record[head.numAttrs];
+        recBuffer.getRecord(record,slot);
 
         // if slot is free skip the loop
         // i.e. check if slot'th entry in slot map of block constains SLOT_UNOCCUPIED
@@ -127,7 +128,7 @@ int BlockAccess::renameRelation(char oldRelName[ATTR_SIZE], char newRelName[ATTR
     strcpy(newRelationName.sVal, newRelName);
 
     // search the relation catalog for an entry with "RelName" = newRelationName
-    char *relCatAttrRelName;
+    char relCatAttrRelName[ATTR_SIZE];
     strcpy(relCatAttrRelName, RELCAT_ATTR_RELNAME);
     RecId recId = BlockAccess::linearSearch(RELCAT_RELID, relCatAttrRelName, newRelationName, EQ);
     // check if relation already exist
@@ -429,15 +430,33 @@ int BlockAccess::insert(int relId, Attribute *record){
 //    copy the result of the search to 'record'
 
 int BlockAccess::search(int relId, Attribute *record, char attrName[ATTR_SIZE], Attribute attrVal, int op){
-    
+   
     RecId recId;
-    recId = BlockAccess::linearSearch(relId, attrName, attrVal, op);
+
+    AttrCatEntry attrCatEntry;
+    int ret = AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatEntry);
+    if(ret != SUCCESS){
+        return ret;     // Error handling
+    }
+
+    int rootBlock = attrCatEntry.rootBlock;
+    
+    if(rootBlock == -1){
+        recId = BlockAccess::linearSearch(relId, attrName, attrVal, op);
+    }
+    else{
+        recId = BPlusTree::bPlusSearch(relId, attrName, attrVal, op);
+    }
+
 
     // if record not found return E_NOTFOUND
     if(recId.block == -1 && recId.slot == -1){
         return E_NOTFOUND;
     }
 
+    /*
+        Copy the record with recId to the record buffer (record)
+    */
     RecBuffer recBuffer(recId.block);
     recBuffer.getRecord(record,recId.slot); //content of that record will be stored in argument record
 

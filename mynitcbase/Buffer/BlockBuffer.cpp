@@ -79,12 +79,14 @@ int BlockBuffer :: getHeader(struct HeadInfo *head) {
         return ret;
     }
 
-    // populate the numEntries, numAttrs and numSlots fields in *head
-    memcpy(&head->numSlots, bufferPtr + 24, 4);
+    // populate the header fields in *head
+    memcpy(&head->blockType, bufferPtr, 4);
+    memcpy(&head->pblock, bufferPtr + 4, 4);
+    memcpy(&head->lblock, bufferPtr + 8, 4);
+    memcpy(&head->rblock, bufferPtr + 12, 4);
     memcpy(&head->numEntries, bufferPtr + 16, 4);
     memcpy(&head->numAttrs, bufferPtr + 20, 4);
-    memcpy(&head->rblock, bufferPtr + 12, 4);
-    memcpy(&head->lblock, bufferPtr + 8, 4);
+    memcpy(&head->numSlots, bufferPtr + 24, 4);
 
     return SUCCESS;
 }
@@ -104,7 +106,7 @@ int BlockBuffer::setHeader(struct HeadInfo *head){
     struct HeadInfo *bufferHead = (struct HeadInfo *)bufferPtr;
 
     // copy the fields of the HeadInfo pointed to by head to the header of the block (pointed by bufferHead)
-    // bufferHead->blockType = head->blockType;
+    bufferHead->blockType = head->blockType;
     bufferHead->pblock = head->pblock;
     bufferHead->lblock = head->lblock;
     bufferHead->rblock = head->rblock;
@@ -158,7 +160,7 @@ int BlockBuffer::getFreeBlock(int blockType){
         }
     }
     
-    if(freeBlock == DISK_BLOCKS){
+    if(freeBlock == -1){
         // disk is full;
         return E_DISKFULL;
     }
@@ -441,7 +443,31 @@ int IndInternal::getEntry(void *ptr, int indexNum){
 }
 
 int IndInternal::setEntry(void *ptr, int indexNum){
-    return 0;
+    // check if indexNum is in the range
+    if(indexNum < 0 || indexNum >= MAX_KEYS_INTERNAL){
+        return E_OUTOFBOUND;
+    }
+
+    unsigned char *bufferPtr;
+    int ret = BlockBuffer::loadBlockAndGetBufferPtr(&bufferPtr);
+    if(ret != SUCCESS){
+        return ret;
+    }
+
+    // typecast the void pointer to an internal entry pointer
+    struct InternalEntry *internalEntry = (struct InternalEntry *)ptr;
+
+    // copy the entries from *internalEntry to the indexNum'th entry
+    unsigned char *entryPtr = bufferPtr + HEADER_SIZE + (indexNum * 20);
+    
+    memcpy(entryPtr, &(internalEntry->lChild), 4);
+    memcpy(entryPtr + 4, &(internalEntry->attrVal), ATTR_SIZE);
+    memcpy(entryPtr + 20, &(internalEntry->rChild), 4);
+
+    // update the dirty bit;
+    ret = StaticBuffer::setDirtyBit(this->blockNum);
+
+    return ret;
 }
 
 
@@ -468,8 +494,27 @@ int IndLeaf::getEntry(void *ptr, int indexNum){
     return SUCCESS;
 }
 
+
 int IndLeaf::setEntry(void *ptr, int indexNum){
-    return 0;
+    // if indexNum is not within the valid range, return error
+    if(indexNum < 0 || indexNum >= MAX_KEYS_LEAF){
+        return E_OUTOFBOUND;
+    }
+
+    unsigned char *bufferPtr;
+    int ret = BlockBuffer::loadBlockAndGetBufferPtr(&bufferPtr);
+    if(ret != SUCCESS){
+        return ret;
+    }
+
+    // copy the Index at ptr to indexNum'th entry in the buffer
+    unsigned char *entryPtr = bufferPtr + HEADER_SIZE + (indexNum * LEAF_ENTRY_SIZE);
+    memcpy(entryPtr, (struct Index *)ptr, LEAF_ENTRY_SIZE);
+
+    // update the dirty bit
+    ret = StaticBuffer::setDirtyBit(this->blockNum);
+
+    return ret;
 }
 
 /* --------------------------- OTHER FUNCTIONS ------------------------------ */

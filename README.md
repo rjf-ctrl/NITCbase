@@ -1,143 +1,260 @@
-# Stage 10 - B+ Tree Search on Relations
+# Stage 11 - Index Creation and Deletion
 
-## B+ Trees
-- index == a set of (key, pointer) pairs that lets you find a record without scanning the whole disk
-- fewer blocks accessed -> faster lookup
-- **B+ tree** keeps itself **balanced**, ->  every lookup walks the same number of levels  & each node is one disk block.
-
-- two types of nodes: 
-1. *Internal Nodes* -> each entry (left child, key, right child) -> no record pointers
-2. *Leaf Nodes* -> (key, record pointer) -> hold real data -> evry key in the tree appears in the leaf nodes (the key in internal nides is justa copy for navigation) -> all leaves are on the same level and are linked together in sorted order
- - since internal nodes have no record pointer, more keys fit per node -> shorter tree
- 
-> For a 1024-byte block with 6-byte pointers and 10-byte keys:
-- **B+ tree internal node:** 10n + 6(n+1) ≤ 1024, so **63 keys**
-- **B tree internal node** (each key also carries a record pointer): 22n + 6 ≤ 1024, so **46 keys**
-
-- RULE: Each key in an internal node = the largest value in its left child.
-- left side holds values ≤ key and the right side holds values > key
-
-**Search for k**
-- Start at the root, compare k with keys left to right.
-- At the first key **≥ k**, go to its **left** child. If none, go to the **rightmost** child.
-- Repeat until you hit a leaf, then scan it.
-**Range query (e.g. > 25):** find 25 in its leaf, then follow the leaf links right.
-
-**Inserting**
-Insertion always happens in a **leaf**. Find the right leaf, then:
-1. If the leaf has room, put the key in (keep it sorted). Done.
- 2. If it’s full, **split the leaf**. Sort all the keys including the new one and give the first half to the old leaf and the second half to a new leaf. **Copy** the largest key of the left half up into the parent.
-3. If the parent is now overfull, **split the parent**. Here the middle key **moves up** and is not kept below.
-4. If the root splits, make a new root. This is the only way the tree grows taller.
-
-This is the main difference to remember: a **leaf split copies** the key up, and an **internal split moves** it up.
+## Goals
+- CREATE INDEX command - create index on any attribute of any relation
+- DROP INDEX to delelte it
+- NITCBase doesnt allow indexing on AttrCat and RelCat
 
 ---
-## GOALS
-- indexing improves search 
-- nitcbase internal node size: 100, leaf node: 63
-- each node, one disk block
-- attribute catalog stores wether a particular attribute is indexed or not
-- if yes, Rootblock field of attrCat contains the root block no, else-1
----
-**Internal Index Block** 
-- Max **100 keys** and **101 child pointers** (the right child of one key = the left child of the next).
-- Block = **32-byte header** + keys and child pointers stored alternately.
-- Header fields:
-    - First 4 bytes: `INDINT`
-    - `PBlock`: parent block number
-    - `#Entries`: actual number of keys stored (max 100)
-    - `LBlock`, `RBlock`, `#Attrs`, `#Slots`: unused here
-- Accessed via the `IndInternal` class; each entry via `struct InternalEntry`.
+## Cache Layer
+- when index created, RootBlock of the attribute is updated with block number
+- this is updated in cache and then written back to buffer when relation is closed
+- so, need *attribute cache update and write back* 
 
-**Leaf Index Block** (stores a leaf node)
-- Max **63 indices**, each a 3-tuple `(attribute value, block number, slot number)`.
-- Each index is **32 bytes** (last 8 unused).
-- Block = **32-byte header** + indices.
-- Header fields:
-    - First 4 bytes: `INDLEAF`
-    - `PBlock`: parent block number (always an **internal** index block)
-    - `LBlock` / `RBlock`: left and right sibling leaves (the linked list)
-    - `#Entries`: actual number of indices stored (max 63)
-    - `#Attrs`, `#Slots`: unused
-- Accessed via the `IndLeaf` class; each entry via `struct Index`.
+#### AttrCacheTabel.cpp
+##### setAttrCatEntry(relId, attrName, attrCatBuff)
+	- check if relId valid(>=0&&<=MAX_OPEN)
+	- check if relation open (attrCache[relId]!=NULL)
+	- loop thru the linked list of atttributes til relName=attrCate[relId].relName
+		- set the AttrCateEntry to attrCatBuff
+		- set dirty=true
+##### setAttrCatEntry(relId, attrOffset, attrCatBuff)
+	- same with offset
 
-**Both:** must be loaded into memory through the Buffer Layer before reading or modifying, and the header is held in `struct HeadInfo`.
-
----
-#### 1. BlockAcces.cpp
-##### search
-	- get attrCache entry of searched attribute
-	- if rootblock==-1 (not indexed attrbute) linearseach()
-	- else BPlusTree::bPlusSearch
-	- getRecord the result
-
-#### 2. AttrCacheTable.cpp
-##### getSearchIndex (relID, attrName)
-	- outofbounds check, relation must be opne
-	- loop thru attribute cache LL of that RelId till strcmp(attrName,entry->attrCatEntry.attrName) == 0 and return the seacrh index
-
-##### getSearchIndex(relId, attroffset)
-	- same as above just entry->attrCatEntry.offset == attrOffset
-
-#### setSearchIndex (relId, attrName)
-	- same as above just entry->searchIndex = *searchIndex;
-
-#### setSearchIndex (relId, attrOffset)
-	-same
-#### llr implemntation of resetSearch index to {-1, -1}
-
-#### Algebra.cpp
-##### select
-	- ONE UPDATE: now, when resetSearchIndex is done, we do both
-		- RelCacheTable::resetSearchIndex(srcRelId);
-		- AttrCacheTable::resetSearchIndex(srcRelId,attr);
-	- since select uses search, we could call either linear search or bplussearch
+## Buffer Layer
+- need to update IndLeaf and IndInternal classes 
+- implement setEntry for them, previously we implemnted a getEntry for them
 
 #### BlockBuffer.cpp
-##### constructors
-	- IndBuffer, IndInternal, IndLeaf
+##### IndInternal::setEntry(void* ptr, indexNum)
+	- check if indexNum is in range (>=0 && <=MAX_KEYS_INTERNAL)
+	- loadBlockAndGetBufferPtr
+	- entryPtr = bufferPtr + HEADER_SIZE + (indexNum*20)
+	- copy 4 bytes of lChild, ATTR_SIZE(16 bytes) of Child, 4 bytes of Child
+	- setDirtyBit(this->blockNum)
 
-##### IndInternal: getEntry
-	- reads one entry (left child, key, right child) of an internal block into the caller's struct
-	- index must be valid for an internal block (max 100 keys), else out of bound
-	- entries are packed 20 bytes apart, not 24, because the right child of one key is the left child of the next (that's why 101 pointers for 100 keys)
+##### IndLead::setEntry(void* ptr, int indexNum)
+	- check if indexNum is in range (>=0 && <=MAX_KEYS_LEAF)
+	- loadBlockAndGetBufferPtr
+	- entryPtr = bufferPtr + HEADER_SIZE + (indexNum*32)
+	- copy 32 bytes of LEAF ENTRY
+	- setDirtyBit(this->blockNum)
 
-##### IndInternal: setEntry
-	- stub for now, writing entries comes in a later stage
-
-##### IndLeaf: getEntry
-	- reads one leaf entry (attr value, block#, slot#) = the key and the record-id it points to
-	- index must be valid for a leaf (max 63 entries), else out of bound
-		- NOTE: bound is the leaf limit, not the internal limit
-	- each leaf entry is a fixed 32 bytes, so entry i sits at a fixed offset after the header
-	- whole entry copied as-is into the caller's struct
-
-##### IndLeaf: setEntry
-	- stub for now
+## Frontend Layer
+#### Frontend.cpp
+##### create_index(relName, attrName) 
+	- Schema Layer::createIndex
+##### drop_index(relName, attrName)
+	- Schema::dropIndex
 
 
+## Schema Layer
+#### Schema.cpp
+##### createIndex()
+	- AttrCat and RelCat not permitted
+	- getRelId
+	- make sure its open
+	- return BPlusTree::bPlusCreate(relId, attrName)
+
+##### dropIndex()
+	- Attrcat and RelCat not permitted 
+	- make sure its open
+	- get the corresponding attrCatEbtry
+	- check if it has an index
+	- BPlusTree::bPlusDestroy
+	- rootBlock=-1, setAttrCatEntry
+
+
+
+## BPlusTree
 #### BPlusTree.cpp
-##### bPlusSearch(relId, attrName, attrVal, op)
-	- position of the previous hit lives in the attr cache's searchIndex (leaf block, index)
+##### bPlusCreate(relId, AttrName)
+	- relCat, attrCat not permitted
+	- get attrCatEntry of attrName
+	- check if index already exists
+	- create Indleaf rootBlockBuf; //gets a free leaf block
+	- get its blocknumber, rootBlock=rootBlockBuf.getBlockNum();
+	- check for DISKFULL
+	- set rootblock in attrCacheTable
+	- load relCatEntry, get firstBlk
+	-  while(block!=-1) loop through the blocks of the relation
+		- get the block, slotmap
+		- loop through every slot, get record bPlusInsert(relId, attrName, record, recid), if DIKS_FULL return DISK_FULL
+		- getHeader, rblock
 
-	- decide where to start
-		- searchIndex == (-1,-1) -> first call, start at the root (no B+ tree -> (-1,-1))
-		- else -> resume at the leaf entry right after the previous hit
-			- if that runs past the leaf's entries, hop to the right sibling
-			- no right sibling -> done
+##### bPlusInsert(relId, attrName, attrVal, recId)
+	- get AttrCatEntry
+	- get rootBlk
+	- get LeafBlkNumber = findLeafToInsert(rootblock, attrVal, attrType)
+	- the insertIntoLeaf() function will propagate the insertion to the required internal nodes by calling the required helper functions like insertIntoInternal() or createNewRoot()
+	- insertIntoLeaf(relId, attrName, leafBlkNumber, indexEntry)
+	- (indexentry is s struct with attrval, block and slot)
+	- if InsertIntoLeaf return E_DISKFULL then bPlusDestroy, set rootBlock-1 in attrCache
 
-	- descend through internal nodes (only when starting from the root, a resumed search is already at a leaf)
-		- NE / LT / LE -> always go left, matches sit at the left end of the leaves (NE needs the whole list anyway) (here we're always trying to get to the first leafnode)
-		- EQ / GE / GT -> go to the left child of the first key that is >= attrVal (> for GT)
-			- no such key -> rightmost child
-		- left because the left child may still hold earlier matches
+##### findLeafToInsert(rootBlock, attrVal, attrType)
+	- blockNum = rootBlock
+	- while(getStaticBlockType(blockNum) != IND_LEAF)  {walk down internal blocks}
+		- IndInternal internalBlock(blockNum), getHeader
+		- index = 0
+		- while(index < numEntries)
+			- getEntry(index)
+			- if compareAttrs(attrVal, entry.attrVal) <= 0, break   
+			- (we're trying to find and attrVal that's just greater than our attrVal)
+			- index++
+		- if index == numEntries (no such entry)
+			- blockNum = rChild of the last entry (numEntries - 1)
+		- else
+			- blockNum = lChild of entry at index
+	- return blockNum   //the leaf where attrVal belongs
 
-	- scan the leaf level
-		- compare each entry to (op, attrVal), first match -> save its position in searchIndex, return its (block, slot)
-		- EQ / LE / LT: values are ascending, so once an entry is bigger than attrVal, stop
-		- only NE walks the leaf linked list. Other ops stop after the current leaf
-		- nothing found -> (-1,-1)
 
-	- tree traversal happens only on the first call, later calls just walk the leaf entries (same idea as the stage notes)
+##### insertIntoLeaf(relId, attrName, leafBlockNum, indexEntry)
+	- get attrCatEntry 
+	- IndLeaf leafBlock(leafBlockNum), getHeader
+	- Index indices[numEntries + 1]   //existing entries + the new one
+	
+	- loop i over existing entries, copy them into indices[] in sorted order
+		- getEntry(i)
+		- if compareAttrs(entry.attrVal, indexEntry.attrVal) <= 0
+			- indices[i] = entry   //entry is smaller or equal, goes before the new one
+		- else
+			- indices[i] = indexEntry, inserted = true   //new one goes here
+			- copy all the remaining entries one slot to the right (indices[j] = entry j-1)
+			- break
+	- if !inserted, indices[numEntries] = indexEntry   //new one is the biggest, goes at the end
+	
+	- if numEntries < MAX_KEYS_LEAF   //room in the block, no split
+		- numEntries++, setHeader
+		- write all indices[] back with setEntry
+		- return SUCCESS
+		
+	- newRightBlk = splitLeaf(leafBlockNum, indices)   //block is full, split into two leaves
+	- if newRightBlk == E_DISKFULL, return E_DISKFULL
+	- if pblock != -1   //leaf has a parent
+		- middleEntry {attrVal = indices[MIDDLE_INDEX_LEAF].attrVal, lChild = leafBlockNum, rChild = newRightBlk}
+		- return insertIntoInternal(relId, attrName, pblock, middleEntry)
+	- else   //leaf was the root
+		- if createNewRoot(relId, attrName, indices[MIDDLE_INDEX_LEAF].attrVal, leafBlockNum, newRightBlk) == E_DISKFULL
+			- return E_DISKFULL
+	- return SUCCESS
 
+##### splitLeaf(leafBlockNum, indices)
+	
+	- IndLeaf rightBlock           //constructor 1, grabs a brand new free leaf block
+	- IndLeaf leftBlock(leafBlockNum)   //the existing full leaf
+	- rightBlockNum = rightBlock.getBlockNum(), leftBlockNum = leftBlock.getBlockNum()
+	- if rightBlockNum == E_DISKFULL, return E_DISKFULL   //no block for the new leaf
+	- getHeader of both leftBlock and rightBlock
+	- set up rightBlock header
+		- numEntries = (MAX_KEYS_LEAF + 1) / 2 = 32
+		- pblock = left's pblock   //same parent as the left block
+		- lblock = leftBlockNum    //left block is to its left
+		- rblock = left's rblock   //takes over whatever was to the right of left
+		- setHeader
+	- set up leftBlock header
+		- numEntries = 32
+		- rblock = rightBlockNum   //new block is now its right neighbour
+		- setHeader
+	- for i = 0 to MIDDLE_INDEX_LEAF (0..31)
+		- leftBlock.setEntry(indices[i], i)                         //first 32 go left
+		- rightBlock.setEntry(indices[i + MIDDLE_INDEX_LEAF + 1], i)  //next 32 (32..63) go right
+	- return rightBlockNum
+
+##### insertIntoInternal(relId, attrName, intBlockNum, intEntry)
+	
+	- get attrCatEntry of attrName 
+	- IndInternal internalBlock(intBlockNum), getHeader
+	- InternalEntry internalEntries[numEntries + 1]   //existing entries + the new one
+	- insertedIndex = -1
+	- loop i over existing entries, copy them into internalEntries[] in sorted order
+		- getEntry(i)
+		- if compareAttrs(entry.attrVal, intEntry.attrVal) <= 0
+			- internalEntries[i] = entry   //entry is smaller or equal, goes before the new one
+		- else
+			- internalEntries[i] = intEntry, insertedIndex = i   //new one goes here
+			- copy all the remaining entries one slot to the right (internalEntries[j] = entry j-1)
+			- break
+	- if insertedIndex == -1   //new one is the biggest, goes at the end
+		- internalEntries[numEntries] = intEntry, insertedIndex = numEntries
+	- fix the child pointers around the new entry
+		- if insertedIndex > 0, internalEntries[insertedIndex-1].rChild = intEntry.lChild
+		- if insertedIndex < numEntries, internalEntries[insertedIndex+1].lChild = intEntry.rChild
+	- if numEntries < MAX_KEYS_INTERNAL   //room in the block, no split
+		- numEntries++, setHeader
+		- write all internalEntries[] back with setEntry
+		- return SUCCESS
+	- newRightBlk = splitInternal(intBlockNum, internalEntries)   //block is full, split into two internal blocks
+	- if newRightBlk == E_DISKFULL
+		- bPlusDestroy(intEntry.rChild)   //subtree built so far isn't attached to the tree yet
+		- return E_DISKFULL
+	- if pblock != -1   //block has a parent
+		- middleEntry {attrVal = internalEntries[MIDDLE_INDEX_INTERNAL].attrVal, lChild = intBlockNum, rChild = newRightBlk}
+		- return insertIntoInternal(relId, attrName, pblock, middleEntry)   //recursion up the tree
+	- else   //block was the root
+		- return createNewRoot(relId, attrName, internalEntries[MIDDLE_INDEX_INTERNAL].attrVal, intBlockNum, newRightBlk)
+
+##### splitInternal(intBlockNum, internalEntries)
+	- IndInternal rightBlock           //constructor 1, grabs a brand new free internal block
+	- IndInternal leftBlock(intBlockNum)   //the existing full internal block
+	- leftBlockNum = leftBlock.getBlockNum(), rightBlockNum = rightBlock.getBlockNum()
+	- if rightBlockNum == E_DISKFULL, return E_DISKFULL   //no block for the new right half
+	- getHeader of both leftBlock and rightBlock
+	- set up rightBlock header
+		- numEntries = MAX_KEYS_INTERNAL / 2 = 50
+		- pblock = left's pblock   //same parent as the left block
+		- setHeader
+	- set up leftBlock header
+		- numEntries = 50
+		- setHeader   //no rblock update, internal blocks aren't linked
+	- for i = 0 to MIDDLE_INDEX_INTERNAL - 1 (0..49)
+		- leftBlock.setEntry(internalEntries[i], i)                              //entries 0..49 stay left
+		- rightBlock.setEntry(internalEntries[i + MIDDLE_INDEX_INTERNAL + 1], i)  //entries 51..100 go right
+		- (entry 50 goes up to the parent, in neither block)
+	- fix pblock of every child of the new right block   //they now live under rightBlock, not leftBlock
+		- BlockBuffer child(internalEntries[MIDDLE_INDEX_INTERNAL + 1].lChild)   //leftmost child of right block
+			- getHeader, pblock = rightBlockNum, setHeader
+		- for i = 0 to MIDDLE_INDEX_INTERNAL - 1
+			- BlockBuffer child(internalEntries[i + MIDDLE_INDEX_INTERNAL + 1].rChild)
+			- getHeader, pblock = rightBlockNum, setHeader
+	- return rightBlockNum
+
+##### createNewRoot(relId, attrName, attrVal, lChild, rChild)
+	
+	- get attrCatEntry 
+	- IndInternal newRootBlock
+	- newRootBlkNum = newRootBlock.getBlockNum()
+	- if newRootBlkNum == E_DISKFULL
+		- bPlusDestroy(rChild)   //right subtree isn't attached to the tree yet, free it
+		- return E_DISKFULL
+	- getHeader of newRootBlock, numEntries = 1, setHeader
+	- build InternalEntry {lChild, attrVal, rChild} from the arguments
+	- newRootBlock.setEntry(entry, 0)    //the only entry of the new root
+	- fix pblock of both children   //they now live under the new root
+		- BlockBuffer leftChildBlock(lChild), BlockBuffer rightChildBlock(rChild)
+		- getHeader of each, pblock = newRootBlkNum, setHeader of each
+	- attrCatEntry.rootBlock = newRootBlkNum
+	- setAttrCatEntry(relId, attrName, attrCatEntry)   //tree now starts at the new root
+	- return SUCCESS
+
+##### bPlusDestroy(rootBlockNum)
+
+	- if rootBlockNum < 0 || rootBlockNum >= DISK_BLOCKS, return E_OUTOFBOUND
+	- type = getStaticBlockType(rootBlockNum)
+	- if type == IND_LEAF   //base case
+		- IndLeaf leafBlock(rootBlockNum)
+		- leafBlock.releaseBlock()
+		- return SUCCESS
+	- else if type == IND_INTERNAL   //recursive case
+		- IndInternal internalBlock(rootBlockNum), getHeader
+		- getEntry(0), bPlusDestroy(entry.lChild)   //leftmost child, only the first entry's lChild
+		- for i = 0 to numEntries - 1
+			- getEntry(i), bPlusDestroy(entry.rChild)   //every entry's rChild
+		- internalBlock.releaseBlock()   //free this block after all its children are gone
+		- return SUCCESS
+	- else
+		- return E_INVALIDBLOCK   //not an index block, refuse to free it
+
+- **`BlockAccess::linearSearch`/`search`:** when the attribute has an index (`rootBlock != -1`), call `BPlusTree::bPlusSearch` instead of scanning linearly. The returned `RecId` is then used to read the record.
+- **`BlockAccess::insert`:** after a record is inserted, add each indexed attribute’s value to its B+ tree with `bPlusInsert`.
+- **`BlockAccess::deleteRelation`:** call `bPlusDestroy` on each attribute’s `rootBlock` before the relation is removed, so index blocks aren’t leaked.
+- **`BlockAccess::renameAttribute` and related functions:** these don’t need index changes, as far as I remember.

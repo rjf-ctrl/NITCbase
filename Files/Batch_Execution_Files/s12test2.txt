@@ -1,0 +1,50 @@
+echo ---- SETUP: create base tables and load data ----
+CREATE TABLE Events(id NUM, title STR, location STR);
+CREATE TABLE Participants(regNo NUM, event STR);
+CREATE TABLE Organizers(name STR, eventId NUM);
+OPEN TABLE Events;
+OPEN TABLE Participants;
+OPEN TABLE Organizers;
+INSERT INTO Events VALUES FROM events.csv;
+INSERT INTO Participants VALUES FROM participants.csv;
+INSERT INTO Organizers VALUES FROM organizers.csv;
+echo ---- Q3.1 location and organizer for every participant ----
+SELECT * FROM Participants JOIN Events INTO PartEvents WHERE Participants.event = Events.title;
+OPEN TABLE PartEvents;
+SELECT * FROM PartEvents JOIN Organizers INTO PartEventOrg WHERE PartEvents.id = Organizers.eventId;
+OPEN TABLE PartEventOrg;
+SELECT regNo, event, location, name FROM PartEventOrg INTO PartContacts;
+OPEN TABLE PartContacts;
+SELECT * FROM PartContacts INTO null;
+echo ---- Q3.2 participants of Thomas events ----
+SELECT * FROM Organizers INTO ThomasOrg WHERE name = Thomas;
+OPEN TABLE ThomasOrg;
+SELECT * FROM ThomasOrg JOIN Events INTO ThomasEvents WHERE ThomasOrg.eventId = Events.id;
+OPEN TABLE ThomasEvents;
+SELECT * FROM Participants JOIN ThomasEvents INTO ThomasPart WHERE Participants.event = ThomasEvents.title;
+OPEN TABLE ThomasPart;
+SELECT regNo, event FROM ThomasPart INTO ThomasPeople;
+OPEN TABLE ThomasPeople;
+SELECT * FROM ThomasPeople INTO null;
+echo ---- CLEANUP: close and drop everything ----
+CLOSE TABLE ThomasPeople;
+DROP TABLE ThomasPeople;
+CLOSE TABLE ThomasPart;
+DROP TABLE ThomasPart;
+CLOSE TABLE ThomasEvents;
+DROP TABLE ThomasEvents;
+CLOSE TABLE ThomasOrg;
+DROP TABLE ThomasOrg;
+CLOSE TABLE PartContacts;
+DROP TABLE PartContacts;
+CLOSE TABLE PartEventOrg;
+DROP TABLE PartEventOrg;
+CLOSE TABLE PartEvents;
+DROP TABLE PartEvents;
+CLOSE TABLE Organizers;
+DROP TABLE Organizers;
+CLOSE TABLE Participants;
+DROP TABLE Participants;
+CLOSE TABLE Events;
+DROP TABLE Events;
+echo ---- DONE: all relations dropped ----

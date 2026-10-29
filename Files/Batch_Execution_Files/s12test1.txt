@@ -1,0 +1,50 @@
+echo ---- SETUP: create base tables and load data ----
+CREATE TABLE Events(id NUM, title STR, location STR);
+CREATE TABLE Locations(name STR, capacity NUM);
+CREATE TABLE Participants(regNo NUM, event STR);
+OPEN TABLE Events;
+OPEN TABLE Locations;
+OPEN TABLE Participants;
+INSERT INTO Events VALUES FROM events.csv;
+INSERT INTO Locations VALUES FROM locations.csv;
+INSERT INTO Participants VALUES FROM participants.csv;
+echo ---- Q1.1 EventLocations ----
+SELECT * FROM Locations JOIN Events INTO LocEvents WHERE Locations.name = Events.location;
+OPEN TABLE LocEvents;
+SELECT name FROM LocEvents INTO EventLocations;
+CLOSE TABLE LocEvents;
+DROP TABLE LocEvents;
+echo ---- Q1.2 AudiPeople ----
+SELECT * FROM Events INTO AudiEvents WHERE location = Audi;
+OPEN TABLE AudiEvents;
+SELECT * FROM Participants JOIN AudiEvents INTO PartAudi WHERE Participants.event = AudiEvents.title;
+CLOSE TABLE AudiEvents;
+DROP TABLE AudiEvents;
+OPEN TABLE PartAudi;
+SELECT regNo, event FROM PartAudi INTO AudiPeople;
+CLOSE TABLE PartAudi;
+DROP TABLE PartAudi;
+ALTER TABLE RENAME AudiPeople COLUMN event TO eventName;
+echo ---- Q1.3 MiniEventPeople ----
+SELECT * FROM Locations INTO MidLoc1 WHERE capacity >= 100;
+OPEN TABLE MidLoc1;
+SELECT * FROM MidLoc1 INTO MidLoc2 WHERE capacity <= 200;
+CLOSE TABLE MidLoc1;
+DROP TABLE MidLoc1;
+OPEN TABLE MidLoc2;
+SELECT * FROM Events JOIN MidLoc2 INTO EventsMid WHERE Events.location = MidLoc2.name;
+CLOSE TABLE MidLoc2;
+DROP TABLE MidLoc2;
+OPEN TABLE EventsMid;
+SELECT * FROM Participants JOIN EventsMid INTO PartMid WHERE Participants.event = EventsMid.title;
+CLOSE TABLE EventsMid;
+DROP TABLE EventsMid;
+OPEN TABLE PartMid;
+SELECT regNo, event FROM PartMid INTO MiniEventPeople;
+CLOSE TABLE PartMid;
+DROP TABLE PartMid;
+ALTER TABLE RENAME MiniEventPeople COLUMN event TO eventName;
+CLOSE TABLE Participants;
+CLOSE TABLE Locations;
+CLOSE TABLE Events;
+echo ---- DONE: Events Locations Participants EventLocations AudiPeople MiniEventPeople created and closed ----

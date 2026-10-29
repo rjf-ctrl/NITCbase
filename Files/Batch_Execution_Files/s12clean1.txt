@@ -1,0 +1,8 @@
+echo ---- dropping all Q1 relations ----
+DROP TABLE EventLocations;
+DROP TABLE AudiPeople;
+DROP TABLE MiniEventPeople;
+DROP TABLE Participants;
+DROP TABLE Locations;
+DROP TABLE Events;
+echo ---- DONE: all dropped ----

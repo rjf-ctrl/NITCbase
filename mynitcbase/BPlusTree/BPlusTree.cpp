@@ -1,7 +1,9 @@
 #include "BPlusTree.h"
 
 #include <cstring>
+#include <iostream>
 
+int cnt=0;
 inline bool operator == (RecId lhs, RecId rhs) {
 	return (lhs.block == rhs.block && lhs.slot == rhs.slot);
 }
@@ -41,7 +43,7 @@ RecId BPlusTree::bPlusSearch(int relId, char attrName[ATTR_SIZE],
         // start the search from the first entry of root.
         block = attrCatEntry.rootBlock;
         index = 0;
-
+        cnt=0;
         if (block == -1) // attrName doesn't have a B+ tree (block == -1)
             return RecId{-1, -1};
 
@@ -96,7 +98,8 @@ RecId BPlusTree::bPlusSearch(int relId, char attrName[ATTR_SIZE],
 
         // declare intEntry which will be used to store an entry of internalBlk.
         InternalEntry intEntry;
-
+        cnt++;
+        std::cout <<"BPlus: " <<  cnt << std::endl;
         // if (/* op is one of NE, LT, LE */)
         if (op == NE || op == LT || op == LE)    
         {
